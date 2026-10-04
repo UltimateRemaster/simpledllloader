@@ -1,8 +1,25 @@
 #include "dllmain.h"
+#include "loader_security.h"
 
+// ============================================================
+// RETAIN THE LEGACY PROXY GLOBALS AND TRACK SAFE INITIALIZATION
+// Existing forwarding stubs require these names and module tables.
+// ============================================================
 HMODULE hm;
-bool bLoadedPluginsYet, bOriginalLibraryLoaded;
+bool bLoadedPluginsYet;
+volatile LONG bOriginalLibraryLoaded;
 char iniPath[MAX_PATH];
+static INIT_ONCE original_library_once = INIT_ONCE_STATIC_INIT;
+static volatile LONG plugin_initialization_state = 0;
+static volatile LONG kernel_hooks_ready = 0;
+
+// ============================================================
+// RECORD EVERY INSTALLED KERNEL HOOK FOR CONDITIONAL RESTORATION
+// Multiple slots for the same API must all be restored without overwriting another mod.
+// ============================================================
+struct ImportPatch { size_t* slot; size_t original; size_t replacement; };
+static ImportPatch import_patches[512] = {};
+static size_t import_patch_count = 0;
 
 enum Kernel32ExportsNames
 {
@@ -31,21 +48,37 @@ enum Kernel32ExportsData
 
 size_t Kernel32Data[Kernel32ExportsNamesCount][Kernel32ExportsDataCount];
 
-void LoadOriginalLibrary()
+// ============================================================
+// INITIALIZE THE ORIGINAL SYSTEM PROXY ONCE WITH AN EXPLICIT PATH
+// This callback is reached from a forwarded call, outside DllMain in dinput8 mode.
+// ============================================================
+BOOL CALLBACK InitializeOriginalLibrary(PINIT_ONCE, PVOID, PVOID*)
 {
-    bOriginalLibraryLoaded = true;
-
-    char SelfPath[MAX_PATH];
-    char szSystemPath[MAX_PATH];
-    GetModuleFileName(hm, SelfPath, MAX_PATH);
-    auto SelfName = strrchr(SelfPath, '\\');
-    SHGetFolderPath(NULL, CSIDL_SYSTEM, NULL, 0, szSystemPath);
-    strcat_s(szSystemPath, SelfName);
+    const std::wstring module_path = loader_security::ModulePath(hm);
+    const size_t separator = module_path.find_last_of(L"\\/");
+    if (separator == std::wstring::npos) return FALSE;
+    const std::wstring filename = module_path.substr(separator + 1);
+    char name_buffer[128] = {};
+    if (!WideCharToMultiByte(CP_ACP, WC_NO_BEST_FIT_CHARS, filename.c_str(), -1,
+        name_buffer + 1, sizeof(name_buffer) - 1, nullptr, nullptr)) return FALSE;
+    const char* SelfName = name_buffer;
+    std::vector<wchar_t> system_directory(32768);
+    const UINT system_length = GetSystemDirectoryW(system_directory.data(), static_cast<UINT>(system_directory.size()));
+    if (system_length == 0 || system_length >= system_directory.size()) return FALSE;
+    const std::wstring original_path = std::wstring(system_directory.data(), system_length) + L"\\" + filename;
+    const bool local_vorbis = _stricmp(SelfName + 1, "vorbisFile.dll") == 0;
+    const bool local_xlive = _stricmp(SelfName + 1, "xlive.dll") == 0;
+    HMODULE original_module = nullptr;
+    if (!local_vorbis && !local_xlive) {
+        original_module = LoadLibraryExW(original_path.c_str(), nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        if (!original_module || original_module == hm) return FALSE;
+    }
 
 #if !X64
 	if(_stricmp(SelfName + 1, "vorbisFile.dll") == 0){
-		strcpy(SelfName+1, "vorbisFileHooked.dll");
-		HMODULE module = LoadLibrary(SelfPath);
+		const std::wstring vorbis_path = loader_security::Directory(module_path) + L"\\vorbisFileHooked.dll";
+		HMODULE module = LoadLibraryExW(vorbis_path.c_str(), nullptr,
+            LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
 		if(module == 0){
 			MessageBox(0, "Could not load library vorbisFileHooked.dll", "DLL Loader", MB_ICONERROR);
 			ExitProcess(0);
@@ -59,25 +92,25 @@ void LoadOriginalLibrary()
 		DWORD oldProtect;
 		VirtualProtect((VOID*)hExecutableInstance, size, PAGE_EXECUTE_READWRITE, &oldProtect);
 	}else if (_stricmp(SelfName + 1, "dsound.dll") == 0)
-		dsound.LoadOriginalLibrary(LoadLibrary(szSystemPath));
+		dsound.LoadOriginalLibrary(original_module);
 	else if (_stricmp(SelfName + 1, "dinput8.dll") == 0)
-		dinput8.LoadOriginalLibrary(LoadLibrary(szSystemPath));
+		dinput8.LoadOriginalLibrary(original_module);
 	else if (_stricmp(SelfName + 1, "ddraw.dll") == 0)
-		ddraw.LoadOriginalLibrary(LoadLibrary(szSystemPath));
+		ddraw.LoadOriginalLibrary(original_module);
 	else if (_stricmp(SelfName + 1, "d3d8.dll") == 0)
-		d3d8.LoadOriginalLibrary(LoadLibrary(szSystemPath));
+		d3d8.LoadOriginalLibrary(original_module);
 	else if (_stricmp(SelfName + 1, "d3d9.dll") == 0)
-		d3d9.LoadOriginalLibrary(LoadLibrary(szSystemPath));
+		d3d9.LoadOriginalLibrary(original_module);
 	else if (_stricmp(SelfName + 1, "d3d11.dll") == 0)
-		d3d11.LoadOriginalLibrary(LoadLibrary(szSystemPath));
+		d3d11.LoadOriginalLibrary(original_module);
 	else if (_stricmp(SelfName + 1, "winmmbase.dll") == 0)
-		winmmbase.LoadOriginalLibrary(LoadLibrary(szSystemPath));
+		winmmbase.LoadOriginalLibrary(original_module);
 	else if (_stricmp(SelfName + 1, "msacm32.dll") == 0)
-		msacm32.LoadOriginalLibrary(LoadLibrary(szSystemPath));
+		msacm32.LoadOriginalLibrary(original_module);
 	else if (_stricmp(SelfName + 1, "dinput.dll") == 0)
-		dinput.LoadOriginalLibrary(LoadLibrary(szSystemPath));
+		dinput.LoadOriginalLibrary(original_module);
 	else if (_stricmp(SelfName + 1, "msvfw32.dll") == 0)
-		msvfw32.LoadOriginalLibrary(LoadLibrary(szSystemPath));
+		msvfw32.LoadOriginalLibrary(original_module);
 	else if (_stricmp(SelfName + 1, "xlive.dll") == 0){
 		// Unprotect image - make .text and .rdata section writeable
 		// get load address of the exe
@@ -104,14 +137,28 @@ void LoadOriginalLibrary()
 	}
 #else
 	if (_stricmp(SelfName + 1, "dsound.dll") == 0)
-		dsound.LoadOriginalLibrary(LoadLibrary(szSystemPath));
+		dsound.LoadOriginalLibrary(original_module);
 	else if (_stricmp(SelfName + 1, "dinput8.dll") == 0)
-		dinput8.LoadOriginalLibrary(LoadLibrary(szSystemPath));
+		dinput8.LoadOriginalLibrary(original_module);
 	else{
 		MessageBox(0, "This library isn't supported. Try to rename it to dsound.dll or dinput8.dll.", "DLL Loader", MB_ICONERROR);
 		ExitProcess(0);
 	}
 #endif
+    if (_stricmp(SelfName + 1, "dinput8.dll") == 0 && !dinput8.DirectInput8Create) return FALSE;
+    InterlockedExchange(&bOriginalLibraryLoaded, 1);
+    return TRUE;
+}
+
+// ============================================================
+// REQUIRE A VALID ORIGINAL LIBRARY BEFORE ANY FORWARDING STUB
+// InitOnce publishes the completed function table to concurrent callers.
+// ============================================================
+void LoadOriginalLibrary() {
+    if (!InitOnceExecuteOnce(&original_library_once, InitializeOriginalLibrary, nullptr, nullptr)) {
+        OutputDebugStringW(L"Simple DLL Loader: original system library could not be loaded.\n");
+        ExitProcess(ERROR_DLL_INIT_FAILED);
+    }
 }
 
 #if !X64
@@ -155,66 +202,69 @@ void Direct3D8DisableMaximizedWindowedModeShim()
 
 void LoadPlugins()
 {
-    char oldDir[MAX_PATH]; // store the current directory
-    GetCurrentDirectory(MAX_PATH, oldDir);
-
-    char selfPath[MAX_PATH];
-    GetModuleFileName(hm, selfPath, MAX_PATH);
-    *strrchr(selfPath, '\\') = '\0';
-    SetCurrentDirectory(selfPath);
-
-	char path[MAX_PATH], *p, *q;
-	FILE *f = fopen("plugins.cfg", "r");
-	if(f == NULL)
-		f = fopen("dlls.cfg", "r");
-	if(f == NULL)
-		return;
-	while(fgets(path, MAX_PATH, f)){
-		p  = path;
-		while(*p && isspace(*p)) p++;
-		if(*p == '\0' || *p == '#')
-			continue;
-		q = p;
-		while(*q) q++;
-		q--;
-		while(isspace(*q)) q--;
-		q[1] = '\0';
-		LoadLibrary(p);
-	}
-	fclose(f);
-	getchar();
-
-    SetCurrentDirectory(oldDir); // Reset the current directory
+    // ============================================================
+    // OPEN THE EXISTING CONFIG PRECEDENCE WITHOUT CHANGING CWD
+    // UTF8/ANSI entries are resolved against the actual loader directory.
+    // ============================================================
+    const std::wstring directory = loader_security::Directory(loader_security::ModulePath(hm));
+    if (directory.empty()) return;
+    FILE* configuration = _wfopen((directory + L"\\plugins.cfg").c_str(), L"rb");
+    if (!configuration) configuration = _wfopen((directory + L"\\dlls.cfg").c_str(), L"rb");
+    if (!configuration) return;
+    std::string line;
+    try {
+        while (true) {
+            const auto result = loader_security::ReadLine(configuration, line);
+            if (result == loader_security::LineResult::End) break;
+            if (result == loader_security::LineResult::Oversized) continue;
+            const std::wstring path = loader_security::AbsolutePath(directory, loader_security::DecodePath(line));
+            if (path.empty()) continue;
+            const DWORD attributes = GetFileAttributesW(path.c_str());
+            if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+            if (!LoadLibraryExW(path.c_str(), nullptr,
+                LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS))
+                OutputDebugStringW(L"Simple DLL Loader: a configured plugin could not be loaded.\n");
+        }
+    } catch (...) {
+        OutputDebugStringW(L"Simple DLL Loader: configuration processing failed.\n");
+    }
+    std::fclose(configuration);
 }
 
 void LoadEverything()
 {
-    if (!bLoadedPluginsYet)
+    // ============================================================
+    // PUBLISH ORIGINAL EXPORTS BEFORE REENTRANT PLUGIN INITIALIZATION
+    // Do not wait on another plugin-loading thread while a DLL may hold loader lock.
+    // ============================================================
+    if (!InterlockedCompareExchange(&bOriginalLibraryLoaded, 0, 0)) LoadOriginalLibrary();
+    if (InterlockedCompareExchange(&plugin_initialization_state, 1, 0) == 0)
     {
-        if (!bOriginalLibraryLoaded)
-            LoadOriginalLibrary();
 #if !X64
         Direct3D8DisableMaximizedWindowedModeShim();
 #endif
         LoadPlugins();
         bLoadedPluginsYet = true;
+        InterlockedExchange(&plugin_initialization_state, 2);
     }
 }
 
 void LoadPluginsAndRestoreIAT()
 {
+    if (!InterlockedCompareExchange(&kernel_hooks_ready, 0, 0)) return;
     LoadEverything();
-
-    for (size_t i = 0; i < Kernel32ExportsNamesCount; i++)
+    if (InterlockedCompareExchange(&plugin_initialization_state, 0, 0) != 2) return;
+    // ============================================================
+    // RESTORE EVERY OWNED SLOT AND PRESERVE OTHER MODS' HOOKS
+    // Restore the previous page protection immediately after each slot write.
+    // ============================================================
+    for (size_t index = 0; index < import_patch_count; ++index)
     {
-        if (Kernel32Data[i][IATPtr] && Kernel32Data[i][ProcAddress])
-        {
-            auto ptr = (size_t*)Kernel32Data[i][IATPtr];
-            DWORD dwProtect[2];
-            VirtualProtect(ptr, sizeof(size_t), PAGE_EXECUTE_READWRITE, &dwProtect[0]);
-            *ptr = Kernel32Data[i][ProcAddress];
-            VirtualProtect(ptr, sizeof(size_t), dwProtect[0], &dwProtect[1]);
-        }
+        const auto& patch = import_patches[index];
+        loader_security::ImportWrite protection(patch.slot);
+        if (protection.Ready()) InterlockedCompareExchangePointer(
+            reinterpret_cast<PVOID volatile*>(patch.slot), reinterpret_cast<PVOID>(patch.original),
+            reinterpret_cast<PVOID>(patch.replacement));
     }
 }
 
@@ -268,7 +318,7 @@ BOOL WINAPI CustomFindNextFileW(HANDLE hFindFile, LPWIN32_FIND_DATAW lpFindFileD
 
 HMODULE WINAPI CustomLoadLibraryA(LPCSTR lpLibFileName)
 {
-    if (!bOriginalLibraryLoaded)
+    if (InterlockedCompareExchange(&kernel_hooks_ready, 0, 0) && !InterlockedCompareExchange(&bOriginalLibraryLoaded, 0, 0))
         LoadOriginalLibrary();
 
     return LoadLibraryA(lpLibFileName);
@@ -276,7 +326,7 @@ HMODULE WINAPI CustomLoadLibraryA(LPCSTR lpLibFileName)
 
 HMODULE WINAPI CustomLoadLibraryW(LPCWSTR lpLibFileName)
 {
-    if (!bOriginalLibraryLoaded)
+    if (InterlockedCompareExchange(&kernel_hooks_ready, 0, 0) && !InterlockedCompareExchange(&bOriginalLibraryLoaded, 0, 0))
         LoadOriginalLibrary();
 
     return LoadLibraryW(lpLibFileName);
@@ -290,12 +340,18 @@ BOOL WINAPI CustomFreeLibrary(HMODULE hLibModule)
         return !NULL;
 }
 
-void HookKernel32IAT()
+void PatchHostImports(HMODULE host, const char* SelfName)
 {
-    auto hExecutableInstance = (size_t)GetModuleHandle(NULL);
-    IMAGE_NT_HEADERS*           ntHeader = (IMAGE_NT_HEADERS*)(hExecutableInstance + ((IMAGE_DOS_HEADER*)hExecutableInstance)->e_lfanew);
-    IMAGE_IMPORT_DESCRIPTOR*    pImports = (IMAGE_IMPORT_DESCRIPTOR*)(hExecutableInstance + ntHeader->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress);
-    size_t                      nNumImports = ntHeader->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].Size / sizeof(IMAGE_IMPORT_DESCRIPTOR) - 1;
+    // ============================================================
+    // VALIDATE THE MAPPED HOST IMAGE AND BOUND EVERY IMPORT WALK
+    // Invalid or absent imports fall back to deferred DirectInput forwarding.
+    // ============================================================
+    loader_security::ImageView image;
+    IMAGE_IMPORT_DESCRIPTOR* pImports = nullptr;
+    size_t nNumImports = 0;
+    if (!SelfName || !loader_security::DescribeImage(host, image) ||
+        !loader_security::ImportDirectory(image, pImports, nNumImports)) return;
+    const size_t hExecutableInstance = reinterpret_cast<size_t>(image.base);
 
     Kernel32Data[eGetStartupInfoA]  [ProcAddress] = (size_t)GetProcAddress(GetModuleHandle("KERNEL32.DLL"), "GetStartupInfoA");
     Kernel32Data[eGetStartupInfoW]  [ProcAddress] = (size_t)GetProcAddress(GetModuleHandle("KERNEL32.DLL"), "GetStartupInfoW");
@@ -309,108 +365,92 @@ void HookKernel32IAT()
     Kernel32Data[eLoadLibraryW]     [ProcAddress] = (size_t)GetProcAddress(GetModuleHandle("KERNEL32.DLL"), "LoadLibraryW");
     Kernel32Data[eFreeLibrary]      [ProcAddress] = (size_t)GetProcAddress(GetModuleHandle("KERNEL32.DLL"), "FreeLibrary");
 
-    auto PatchIAT = [&nNumImports, &hExecutableInstance, &pImports](size_t start, size_t end, size_t exe_end)
+    auto PatchIAT = [&image](size_t start, size_t end, size_t exe_end)
     {
-        for (size_t i = 0; i < nNumImports; i++)
+        if (!end || end > exe_end) end = exe_end;
+        if (start < reinterpret_cast<size_t>(image.base) || start > end) return;
+        for (auto i = start; i < end && sizeof(size_t) <= end - i; i += sizeof(size_t))
         {
-            if (hExecutableInstance + (pImports + i)->FirstThunk > start && !(end && hExecutableInstance + (pImports + i)->FirstThunk > end))
-                end = hExecutableInstance + (pImports + i)->FirstThunk;
-        }
-
-        if (!end) { end = start + 0x100; }
-        if (end > exe_end) //for very broken exes
-        { 
-            start = hExecutableInstance;
-            end = exe_end; 
-        }
-
-        for (auto i = start; i < end; i += sizeof(size_t))
-        {
-            DWORD dwProtect[2];
-            VirtualProtect((size_t*)i, sizeof(size_t), PAGE_EXECUTE_READWRITE, &dwProtect[0]);
-
             auto ptr = *(size_t*)i;
+            if (!ptr) break;
+            bool relevant = false;
+            for (size_t function_index = 0; function_index < Kernel32ExportsNamesCount; ++function_index)
+                relevant = relevant || (ptr == Kernel32Data[function_index][ProcAddress]);
+            if (!relevant || import_patch_count == _countof(import_patches)) continue;
+            loader_security::ImportWrite protection(reinterpret_cast<void*>(i));
+            if (!protection.Ready()) continue;
+            size_t replacement = ptr;
 
             if (ptr == Kernel32Data[eGetStartupInfoA][ProcAddress])
             {
                 Kernel32Data[eGetStartupInfoA][IATPtr] = i;
-                *(size_t*)i = (size_t)CustomGetStartupInfoA;
+                replacement = (size_t)CustomGetStartupInfoA;
             }
             else if (ptr == Kernel32Data[eGetStartupInfoW][ProcAddress])
             {
                 Kernel32Data[eGetStartupInfoW][IATPtr] = i;
-                *(size_t*)i = (size_t)CustomGetStartupInfoW;
+                replacement = (size_t)CustomGetStartupInfoW;
             }
             else if (ptr == Kernel32Data[eGetModuleHandleA][ProcAddress])
             {
                 Kernel32Data[eGetModuleHandleA][IATPtr] = i;
-                *(size_t*)i = (size_t)CustomGetModuleHandleA;
+                replacement = (size_t)CustomGetModuleHandleA;
             }
             else if (ptr == Kernel32Data[eGetModuleHandleW][ProcAddress])
             {
                 Kernel32Data[eGetModuleHandleW][IATPtr] = i;
-                *(size_t*)i = (size_t)CustomGetModuleHandleW;
+                replacement = (size_t)CustomGetModuleHandleW;
             }
             else if (ptr == Kernel32Data[eGetProcAddress][ProcAddress])
             {
                 Kernel32Data[eGetProcAddress][IATPtr] = i;
-                *(size_t*)i = (size_t)CustomGetProcAddress;
+                replacement = (size_t)CustomGetProcAddress;
             }
             else if (ptr == Kernel32Data[eGetShortPathNameA][ProcAddress])
             {
                 Kernel32Data[eGetShortPathNameA][IATPtr] = i;
-                *(size_t*)i = (size_t)CustomGetShortPathNameA;
+                replacement = (size_t)CustomGetShortPathNameA;
             }
             else if (ptr == Kernel32Data[eFindNextFileA][ProcAddress])
             {
                 Kernel32Data[eFindNextFileA][IATPtr] = i;
-                *(size_t*)i = (size_t)CustomFindNextFileA;
+                replacement = (size_t)CustomFindNextFileA;
             }
             else if (ptr == Kernel32Data[eFindNextFileW][ProcAddress])
             {
                 Kernel32Data[eFindNextFileW][IATPtr] = i;
-                *(size_t*)i = (size_t)CustomFindNextFileW;
+                replacement = (size_t)CustomFindNextFileW;
             }
             else if (ptr == Kernel32Data[eLoadLibraryA][ProcAddress])
             {
                 Kernel32Data[eLoadLibraryA][IATPtr] = i;
-                *(size_t*)i = (size_t)CustomLoadLibraryA;
+                replacement = (size_t)CustomLoadLibraryA;
             }
             else if (ptr == Kernel32Data[eLoadLibraryW][ProcAddress])
             {
                 Kernel32Data[eLoadLibraryW][IATPtr] = i;
-                *(size_t*)i = (size_t)CustomLoadLibraryW;
+                replacement = (size_t)CustomLoadLibraryW;
             }
             else if (ptr == Kernel32Data[eFreeLibrary][ProcAddress])
             {
                 Kernel32Data[eFreeLibrary][IATPtr] = i;
-                *(size_t*)i = (size_t)CustomFreeLibrary;
+                replacement = (size_t)CustomFreeLibrary;
             }
 
-            VirtualProtect((size_t*)i, sizeof(size_t), dwProtect[0], &dwProtect[1]);
+            if (replacement != ptr && reinterpret_cast<size_t>(InterlockedCompareExchangePointer(
+                reinterpret_cast<PVOID volatile*>(i), reinterpret_cast<PVOID>(replacement), reinterpret_cast<PVOID>(ptr))) == ptr)
+                import_patches[import_patch_count++] = {reinterpret_cast<size_t*>(i), ptr, replacement};
         }
     };
 
-    static auto getSection = [](const PIMAGE_NT_HEADERS nt_headers, unsigned section) -> PIMAGE_SECTION_HEADER
-    {
-        return reinterpret_cast<PIMAGE_SECTION_HEADER>(
-            (UCHAR*)nt_headers->OptionalHeader.DataDirectory +
-            nt_headers->OptionalHeader.NumberOfRvaAndSizes * sizeof(IMAGE_DATA_DIRECTORY) +
-            section * sizeof(IMAGE_SECTION_HEADER));
-    };
- 
-    auto sec = getSection(ntHeader, ntHeader->FileHeader.NumberOfSections - 1);
-    auto secSize = max(sec->SizeOfRawData, sec->Misc.VirtualSize);
-    auto hExecutableInstance_end = hExecutableInstance + max(sec->PointerToRawData, sec->VirtualAddress) + secSize;
-
-    char SelfPath[MAX_PATH];
-    GetModuleFileName(hm, SelfPath, MAX_PATH);
-    auto SelfName = strrchr(SelfPath, '\\') + 1;
+    const size_t hExecutableInstance_end = hExecutableInstance + image.length;
     
     // Find kernel32.dll
     for (size_t i = 0; i < nNumImports; i++)
     {
-        if ((size_t)(hExecutableInstance + (pImports + i)->Name) < hExecutableInstance_end)
+        if (!(pImports + i)->Name) break;
+        if ((pImports + i)->FirstThunk && (pImports + i)->FirstThunk % sizeof(size_t) == 0 && image.StringAt((pImports + i)->Name) &&
+            image.Contains((pImports + i)->FirstThunk, sizeof(IMAGE_THUNK_DATA)))
         {
             if (!_stricmp((const char*)(hExecutableInstance + (pImports + i)->Name), "KERNEL32.DLL"))
                 PatchIAT(hExecutableInstance + (pImports + i)->FirstThunk, 0, hExecutableInstance_end);
@@ -418,19 +458,20 @@ void HookKernel32IAT()
             //Checking for ordinals
             if (!_stricmp((const char*)(hExecutableInstance + (pImports + i)->Name), SelfName))
             {
+                if (!(pImports + i)->OriginalFirstThunk ||
+                    !image.Contains((pImports + i)->OriginalFirstThunk, sizeof(IMAGE_THUNK_DATA))) continue;
                 PIMAGE_THUNK_DATA thunk = (PIMAGE_THUNK_DATA)(hExecutableInstance + (pImports + i)->OriginalFirstThunk);
                 size_t j = 0;
-                while (thunk->u1.Function)
+                while (image.Contains((pImports + i)->OriginalFirstThunk + j * sizeof(IMAGE_THUNK_DATA), sizeof(IMAGE_THUNK_DATA)) &&
+                    image.Contains((pImports + i)->FirstThunk + j * sizeof(size_t), sizeof(size_t)) && thunk->u1.Function)
                 {
                     if (thunk->u1.Ordinal & IMAGE_ORDINAL_FLAG)
                     {
-                        PIMAGE_IMPORT_BY_NAME import = (PIMAGE_IMPORT_BY_NAME)(hExecutableInstance + thunk->u1.AddressOfData);
                         void** p = (void**)(hExecutableInstance + (pImports + i)->FirstThunk);
+                        loader_security::ImportWrite protection(&p[j]);
+                        if (!protection.Ready()) { ++thunk; ++j; continue; }
                         if (!_stricmp(SelfName, "DSOUND.DLL"))
                         {
-                            DWORD Protect;
-                            VirtualProtect(&p[j], 4, PAGE_EXECUTE_READWRITE, &Protect);
-
                             const enum edsound
                             {
                                 DirectSoundCaptureCreate = 6,
@@ -483,27 +524,43 @@ void HookKernel32IAT()
                         }
                         else if (!_stricmp(SelfName, "DINPUT8.DLL"))
                         {
-                            DWORD Protect;
-                            VirtualProtect(&p[j], 4, PAGE_EXECUTE_READWRITE, &Protect);
-
                             if ((IMAGE_ORDINAL(thunk->u1.Ordinal)) == 1)
                                 p[j] = _DirectInput8Create;
                         }
                     }
                     ++thunk;
+                    ++j;
                 }
             }
         }
     }
 }
 
+// ============================================================
+// APPLY HOST HOOKS USING THE ACTUAL PROXY BASENAME
+// The descriptor patcher is separately testable with an isolated PE fixture.
+// ============================================================
+void HookKernel32IAT() {
+    const std::wstring module_path = loader_security::ModulePath(hm);
+    const size_t separator = module_path.find_last_of(L"\\/");
+    if (separator == std::wstring::npos) return;
+    char filename[128] = {};
+    if (!WideCharToMultiByte(CP_ACP, WC_NO_BEST_FIT_CHARS, module_path.c_str() + separator + 1,
+        -1, filename, _countof(filename), nullptr, nullptr)) return;
+    PatchHostImports(GetModuleHandleW(nullptr), filename);
+}
+
 void Init()
 {
-    GetModuleFileName(hm, iniPath, MAX_PATH);
-    *strrchr(iniPath, '\\') = '\0';
-    strcat_s(iniPath, "\\dllloader.ini");
-
-    auto nForceEPHook = GetPrivateProfileInt("globalsets", "forceentrypointhook", TRUE, iniPath);
+    // ============================================================
+    // READ BOOTSTRAP SETTINGS BY ABSOLUTE UNICODE PATH
+    // DirectInput exports provide safe lazy initialization when hooks are disabled.
+    // ============================================================
+    const std::wstring module_path = loader_security::ModulePath(hm);
+    const std::wstring configuration_path = loader_security::Directory(module_path) + L"\\dllloader.ini";
+    WideCharToMultiByte(CP_ACP, WC_NO_BEST_FIT_CHARS, configuration_path.c_str(), -1,
+        iniPath, _countof(iniPath), nullptr, nullptr);
+    auto nForceEPHook = GetPrivateProfileIntW(L"globalsets", L"forceentrypointhook", TRUE, configuration_path.c_str());
 
     if (GetModuleHandle(NULL) && nForceEPHook != FALSE)
     {
@@ -511,8 +568,11 @@ void Init()
     }
     else
     {
-        LoadEverything();
+        const size_t separator = module_path.find_last_of(L"\\/");
+        if (separator == std::wstring::npos || _wcsicmp(module_path.c_str() + separator + 1, L"dinput8.dll") != 0)
+            LoadEverything();
     }
+    InterlockedExchange(&kernel_hooks_ready, 1);
 }
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID /*lpReserved*/)

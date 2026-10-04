@@ -3,6 +3,11 @@
 #include <Shlobj.h>
 #include <stdio.h>
 #include <stdint.h>
+// ============================================================
+// DECLARE DEFERRED INITIALIZATION FOR THE DIRECTINPUT FORWARDERS
+// Preserve incoming registers and flags before tail-jumping to the system DLL.
+// ============================================================
+void LoadEverything();
 #if X64
 #include <dsound.h>
 #endif
@@ -933,7 +938,12 @@ __declspec(naked) void _ov_time_seek_page_lap() { _asm { jmp[vorbisfile.ov_time_
 __declspec(naked) void _ov_time_tell() { _asm { jmp[vorbisfile.ov_time_tell] } }
 __declspec(naked) void _ov_time_total() { _asm { jmp[vorbisfile.ov_time_total] } }
 
-__declspec(naked) void _DirectInput8Create() { _asm { jmp[dinput8.DirectInput8Create] } }
+// ============================================================
+// INITIALIZE DIRECTINPUT AND COM EXPORTS OUTSIDE THE LOADER LOCK
+// Retain the original x86 forwarding ABI and all original export names.
+// ============================================================
+#define INITIALIZE_PROXY_FORWARDING __asm pushfd __asm pushad __asm call LoadEverything __asm popad __asm popfd
+__declspec(naked) void _DirectInput8Create() { INITIALIZE_PROXY_FORWARDING _asm { jmp[dinput8.DirectInput8Create] } }
 
 __declspec(naked) void _DirectInputCreateA() { _asm { jmp[dinput.DirectInputCreateA] } }
 __declspec(naked) void _DirectInputCreateEx() { _asm { jmp[dinput.DirectInputCreateEx] } }
@@ -941,6 +951,7 @@ __declspec(naked) void _DirectInputCreateW() { _asm { jmp[dinput.DirectInputCrea
 
 __declspec(naked) void _DllCanUnloadNow()
 {
+    INITIALIZE_PROXY_FORWARDING
     if (dinput8.DllCanUnloadNow)
         _asm { jmp[dinput8.DllCanUnloadNow] }
     else
@@ -952,6 +963,7 @@ __declspec(naked) void _DllCanUnloadNow()
 }
 __declspec(naked) void _DllGetClassObject()
 {
+    INITIALIZE_PROXY_FORWARDING
     if (dinput8.DllGetClassObject)
         _asm { jmp[dinput8.DllGetClassObject] }
     else
@@ -964,6 +976,7 @@ __declspec(naked) void _DllGetClassObject()
 
 __declspec(naked) void _DllRegisterServer()
 {
+    INITIALIZE_PROXY_FORWARDING
     if (dinput8.DllRegisterServer)
         _asm { jmp[dinput8.DllRegisterServer] }
     else
@@ -973,6 +986,7 @@ __declspec(naked) void _DllRegisterServer()
 
 __declspec(naked) void _DllUnregisterServer()
 {
+    INITIALIZE_PROXY_FORWARDING
     if (dinput8.DllUnregisterServer)
         _asm { jmp[dinput8.DllUnregisterServer] }
     else
@@ -980,6 +994,7 @@ __declspec(naked) void _DllUnregisterServer()
             _asm { jmp[dinput8.DllUnregisterServer] }
 }
 
+#undef INITIALIZE_PROXY_FORWARDING
 __declspec(naked) void _DirectSoundCaptureCreate() { _asm { jmp[dsound.DirectSoundCaptureCreate] } }
 __declspec(naked) void _DirectSoundCaptureCreate8() { _asm { jmp[dsound.DirectSoundCaptureCreate8] } }
 __declspec(naked) void _DirectSoundCaptureEnumerateA() { _asm { jmp[dsound.DirectSoundCaptureEnumerateA] } }

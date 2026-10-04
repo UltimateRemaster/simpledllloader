@@ -2,6 +2,10 @@ Simple DLL Loader
 ===================
 fork of the Ultimate ASI Loader
 
+Loads configured mod DLLs in Final Fantasy VIII Remastered and forwards DirectInput calls to Windows.
+Changes are limited to the game's loading requirements, with safer DLL path handling and corrected initialization timing, to improve security and address antivirus alerts reported by VirusTotal.
+
+
 DESCRIPTION
 ------------------------
 This is a DLL file which adds DLL plugin loading functionality to any game which uses any of the following libraries:
