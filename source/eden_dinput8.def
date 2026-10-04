@@ -1,0 +1,12 @@
+; ============================================================
+; MATCH THE SIX WINDOWS DIRECTINPUT EXPORT NAMES AND ORDINALS
+; The internal aliases specify their exact x86 stdcall decoration.
+; ============================================================
+LIBRARY "dinput8"
+EXPORTS
+    DirectInput8Create = _EdenDirectInput8Create@20 @1
+    DllCanUnloadNow = _EdenDllCanUnloadNow@0 @2 PRIVATE
+    DllGetClassObject = _EdenDllGetClassObject@12 @3 PRIVATE
+    DllRegisterServer = _EdenDllRegisterServer@0 @4 PRIVATE
+    DllUnregisterServer = _EdenDllUnregisterServer@0 @5 PRIVATE
+    GetdfDIJoystick = _EdenGetdfDIJoystick@0 @6
