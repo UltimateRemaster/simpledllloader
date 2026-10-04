@@ -1,21 +1,10 @@
 // ============================================================
-// IDENTIFY THE EDEN SECURITY CANDIDATE AND ITS UPSTREAM AUTHOR
-// This version describes the local fork revision, not an official aap release.
+// IDENTIFY THE EDEN LOADER AND ITS ORIGINAL AUTHOR
+// Keep the website and the user's fork in separate metadata fields.
 // ============================================================
 #include <winver.h>
+LANGUAGE 0x09, 0x01
 1 VERSIONINFO
-#ifdef DIRECTINPUT_ONLY
-#ifdef FF8_EARLY_STARTUP
-FILEVERSION 1,0,0,3
-PRODUCTVERSION 1,0,0,3
-#else
-FILEVERSION 1,0,0,2
-PRODUCTVERSION 1,0,0,2
-#endif
-#else
-FILEVERSION 1,0,0,1
-PRODUCTVERSION 1,0,0,1
-#endif
 FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
 FILEFLAGS 0
 FILEOS VOS_NT_WINDOWS32
@@ -27,33 +16,11 @@ BEGIN
         BLOCK "040904B0"
         BEGIN
             VALUE "CompanyName", "aap / Ultimate Remaster\0"
-#ifdef DIRECTINPUT_ONLY
-            VALUE "FileDescription", "Eden DirectInput8 proxy and configured DLL loader\0"
-#ifdef FF8_EARLY_STARTUP
-            VALUE "FileVersion", "1.0.0.3\0"
-#else
-            VALUE "FileVersion", "1.0.0.2\0"
-#endif
-#else
-            VALUE "FileDescription", "Simple DLL Loader - Eden security candidate\0"
-            VALUE "FileVersion", "1.0.0.1\0"
-#endif
-            VALUE "InternalName", "dinput8\0"
-            VALUE "OriginalFilename", "dinput8.dll\0"
-            VALUE "ProductName", "Simple DLL Loader - Eden fork\0"
-#ifdef DIRECTINPUT_ONLY
-#ifdef FF8_EARLY_STARTUP
-            VALUE "ProductVersion", "1.0.0.3\0"
-#else
-            VALUE "ProductVersion", "1.0.0.2\0"
-#endif
-#else
-            VALUE "ProductVersion", "1.0.0.1\0"
-#endif
-            VALUE "LegalCopyright", "Copyright (c) 2017. Eden changes Copyright (c) 2026 Ultimate Remaster.\0"
-            VALUE "Comments", "Based on aap Simple DLL Loader c477a43; MIT license. Security fixes by Ultimate Remaster.\0"
+            VALUE "FileDescription", "FFVIII Remastered DirectInput8 proxy and configured mod DLL loader; Eden fork by Ultimate Remaster.\0"
+            VALUE "ProductName", "dinput8.dll\0"
+            VALUE "LegalCopyright", "Copyright (c) 2017 aap. Eden fork modifications Copyright (c) Ultimate Remaster.\0"
             VALUE "Website", "https://ultimateremaster.com\0"
-            VALUE "RepositoryUrl", "https://github.com/aap/simpledllloader\0"
+            VALUE "RepositoryUrl", "https://github.com/UltimateRemaster/simpledllloader\0"
         END
     END
     BLOCK "VarFileInfo"
